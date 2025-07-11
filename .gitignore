@@ -1,0 +1,17 @@
+# Dart
+.dart_tool/
+.packages
+.pub/
+build/
+*.lock
+
+# Prisma
+prisma/prisma-query-engine*
+prisma/migrations/
+.env
+
+# VSCode
+.vscode/
+
+# IDE
+.idea/
