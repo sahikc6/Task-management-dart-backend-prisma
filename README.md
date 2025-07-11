@@ -1,2 +1,1 @@
-A sample command-line application with an entrypoint in `bin/`, library code
-in `lib/`, and example unit test in `test/`.
+This is a backend API developed using Dart with the Shelf framework, connected to a MySQL database using Prisma ORM. It includes user authentication (register/login), password hashing, JWT token generation, and task CRUD operations with user-based filtering. Ideal for learning full-stack Dart, Prisma ORM, and building scalable backend services.
