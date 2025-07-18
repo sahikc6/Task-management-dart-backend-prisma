@@ -3,7 +3,14 @@ import 'package:dotenv/dotenv.dart';
 
 final env = DotEnv()..load();
 
+String getJwtSecret() => env['JWT_SECRET']!;
+
 String generateToken(String email) {
   final jwt = JWT({'email': email});
-  return jwt.sign(SecretKey(env['JWT_SECRET']!));
+
+  // Set expiration while signing
+  return jwt.sign(
+    SecretKey(getJwtSecret()),
+    expiresIn: Duration(hours: 1), // ⬅️ set token to expire in 1 hour
+  );
 }

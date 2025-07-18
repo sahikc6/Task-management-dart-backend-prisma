@@ -7,8 +7,8 @@ Tech Stack:-
 - Dart – Clean backend language with strong async support  
 - Prisma ORM – Type-safe database client for Dart  
 - Shelf – Lightweight HTTP server for building APIs  
-- MySQL – Relational database  
-- JWT – Token-based authentication  
+- MySQL – Relational database
+- JWT – Token-based authentication
 - Crypto – SHA256 password hashing
 
 Features:-

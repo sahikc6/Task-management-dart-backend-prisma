@@ -1,44 +1,25 @@
 import 'dart:convert';
+import 'dart:developer';
+import 'package:backend/utils/rabin_karp.dart';
+import 'package:backend/utils/task_history.dart';
 import 'package:shelf/shelf.dart';
-import 'package:orm/orm.dart';
-
-import '../generated_dart_client/client.dart';
-import '../generated_dart_client/prisma.dart';
-
-final prisma = PrismaClient();
+import '../services/task_service.dart';
+import '../utils/response_utils.dart';
+import '../utils/task_priority.dart';
 
 class TaskController {
-  /// Get all tasks for a specific user
   static Future<Response> getTasks(Request request) async {
+    final userEmail = request.context['userEmail'] as String?;
+    if (userEmail == null) return unauthorized('User not authenticated');
+
+    final user = await TaskService.findUserByEmail(userEmail);
+    if (user == null) return notFound('User not found');
+
     try {
-      // Extract query parameters from the URL (e.g., ?userId=1)
-      final query = request.requestedUri.queryParameters;
-      final userId = int.tryParse(query['userId'] ?? '');
+      log(' Fetching tasks for user: $userEmail');
+      final tasks = await TaskService.getTasksByUserId(user.id!);
 
-      if (userId == null) {
-        return Response(
-          400,
-          body: jsonEncode({'error': 'Missing or invalid userId'}),
-          headers: {'Content-Type': 'application/json'},
-        );
-      }
-
-      // Verify user exists
-      final user = await prisma.user.findUnique(
-        where: UserWhereUniqueInput(id: userId),
-      );
-
-      if (user == null) {
-        return Response.notFound(jsonEncode({'error': 'User not found'}));
-      }
-
-      final tasks = await prisma.task.findMany(
-        where: TaskWhereInput(userId: PrismaUnion.$2(userId)),
-        include: TaskInclude(user: PrismaUnion.$1(true)),
-      );
-
-      // Convert tasks to map for JSON encoding
-      final tasksList = tasks
+      final result = tasks
           .map(
             (task) => {
               'id': task.id,
@@ -54,199 +35,233 @@ class TaskController {
           )
           .toList();
 
-      return Response.ok(
-        jsonEncode(tasksList),
-        headers: {'Content-Type': 'application/json'},
-      );
-    } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': 'Failed to fetch tasks: ${e.toString()}'}),
-        headers: {'Content-Type': 'application/json'},
-      );
+      return jsonResponse(200, {'tasks': result});
+    } catch (e, stack) {
+      log(' Error fetching tasks: $e', stackTrace: stack);
+      return serverError('Failed to fetch tasks: $e');
     }
   }
 
-  /// Create task for a specific user
   static Future<Response> createTask(Request request) async {
+    final userEmail = request.context['userEmail'] as String?;
+    if (userEmail == null) return unauthorized('User not authenticated');
+
     try {
       final body = jsonDecode(await request.readAsString());
-      final userId = body['userId'];
+      final String? title = body['title'];
 
-      if (userId == null || body['title'] == null) {
-        return Response(
-          400,
-          body: jsonEncode({'error': 'Missing userId or title'}),
-          headers: {'Content-Type': 'application/json'},
-        );
+      if (title == null || title.trim().isEmpty) {
+        log(' Task creation failed: Empty title');
+        return badRequest('Missing or empty title');
       }
 
-      final user = await prisma.user.findUnique(
-        where: UserWhereUniqueInput(id: userId),
-      );
-      if (user == null) {
-        return Response.notFound(jsonEncode({'error': 'User not found'}));
-      }
+      final user = await TaskService.findUserByEmail(userEmail);
+      if (user == null) return notFound('User not found');
 
-      DateTime? dueDate;
-      if (body['dueDate'] != null) {
-        try {
-          dueDate = DateTime.parse(body['dueDate']);
-        } catch (_) {
-          return Response(
-            400,
-            body: jsonEncode({'error': 'Invalid date format'}),
-            headers: {'Content-Type': 'application/json'},
-          );
-        }
-      }
+      log(' Creating task for user: $userEmail');
+      final task = await TaskService.createTask({...body, 'userId': user.id});
+      if (task == null) return serverError('Task creation failed');
 
-      final task = await prisma.task.create(
-        data: PrismaUnion.$1(
-          TaskCreateInput(
-            title: body['title'],
-            description: body['description'] != null
-                ? PrismaUnion.$1(body['description'])
-                : null,
-            dueDate: dueDate != null ? PrismaUnion.$1(dueDate) : null,
-            isDone: body['isDone'] ?? false,
-            completed: body['completed'] ?? false, // Required field
-            user: UserCreateNestedOneWithoutTasksInput(
-              connect: UserWhereUniqueInput(id: userId),
-            ),
-          ),
-        ),
-      );
-
-      return Response.ok(
-        jsonEncode({
-          'id': task.id,
-          'title': task.title,
-          'description': task.description,
-          'dueDate': task.dueDate?.toIso8601String(),
-          'isDone': task.isDone,
-          'completed': task.isDone,
-          'userId': task.userId,
-        }),
-        headers: {'Content-Type': 'application/json'},
-      );
-    } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': 'Failed to create task: ${e.toString()}'}),
-        headers: {'Content-Type': 'application/json'},
-      );
+      return jsonResponse(200, {
+        'id': task.id,
+        'title': task.title,
+        'description': task.description,
+        'dueDate': task.dueDate?.toIso8601String(),
+        'isDone': task.isDone,
+        'userId': task.userId,
+      });
+    } catch (e, stack) {
+      log(' Error creating task: $e', stackTrace: stack);
+      return serverError('Failed to create task: $e');
     }
   }
 
-  /// Update a task by ID
   static Future<Response> updateTask(Request request, String id) async {
+    final userEmail = request.context['userEmail'] as String?;
+    if (userEmail == null) return unauthorized('User not authenticated');
+
+    final taskId = int.tryParse(id);
+    if (taskId == null) return badRequest('Invalid task ID');
+
     try {
-      final taskId = int.tryParse(id);
       final body = jsonDecode(await request.readAsString());
+      final user = await TaskService.findUserByEmail(userEmail);
+      if (user == null) return notFound('User not found');
 
-      if (taskId == null || body['userId'] == null) {
-        return Response(
-          400,
-          body: jsonEncode({'error': 'Invalid taskId or userId'}),
-          headers: {'Content-Type': 'application/json'},
-        );
+      final existing = await TaskService.findTaskByIdForUser(taskId, user.id!);
+      if (existing == null) return notFound('Task not found or unauthorized');
+
+      log(' Updating task ID $taskId for $userEmail');
+      final updated = await TaskService.updateTask(taskId, body);
+      if (updated == null) return serverError('Task update failed');
+
+      if (updated.isDone == true && existing.isDone != updated.isDone) {
+        log(' Task $taskId marked as done – pushing to history');
+        TaskHistory.push(updated);
       }
 
-      final task = await prisma.task.findUnique(
-        where: TaskWhereUniqueInput(id: taskId),
-      );
-
-      if (task == null || task.userId != body['userId']) {
-        return Response.notFound(
-          jsonEncode({'error': 'Task not found or unauthorized'}),
-        );
-      }
-
-      DateTime? dueDate;
-      if (body['dueDate'] != null) {
-        try {
-          dueDate = DateTime.parse(body['dueDate']);
-        } catch (_) {
-          return Response(
-            400,
-            body: jsonEncode({'error': 'Invalid dueDate format'}),
-            headers: {'Content-Type': 'application/json'},
-          );
-        }
-      }
-
-      final updated = await prisma.task.update(
-        where: TaskWhereUniqueInput(id: taskId),
-        data: PrismaUnion.$1(
-          TaskUpdateInput(
-            title: body['title'] != null
-                ? PrismaUnion.$1(body['title'].toString())
-                : null,
-            description: body['description'] != null
-                ? PrismaUnion.$1(body['description'].toString())
-                : null,
-            dueDate: dueDate != null ? PrismaUnion.$1(dueDate) : null,
-            isDone: body['isDone'] != null
-                ? PrismaUnion.$1(body['isDone'] as bool)
-                : null,
-          ),
-        ),
-      );
-
-      return Response.ok(
-        jsonEncode({
-          'id': updated!.id,
-          'title': updated.title,
-          'description': updated.description,
-          'dueDate': updated.dueDate?.toIso8601String(),
-          'isDone': updated.isDone,
-          'userId': updated.userId,
-        }),
-        headers: {'Content-Type': 'application/json'},
-      );
-    } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': 'Failed to update task: ${e.toString()}'}),
-        headers: {'Content-Type': 'application/json'},
-      );
+      return jsonResponse(200, {
+        'id': updated.id,
+        'title': updated.title,
+        'description': updated.description,
+        'dueDate': updated.dueDate?.toIso8601String(),
+        'isDone': updated.isDone,
+        'userId': updated.userId,
+      });
+    } catch (e, stack) {
+      log(' Error updating task: $e', stackTrace: stack);
+      return serverError('Failed to update task: $e');
     }
   }
 
-  /// Delete a task by ID
   static Future<Response> deleteTask(Request request, String id) async {
+    final userEmail = request.context['userEmail'] as String?;
+    if (userEmail == null) return unauthorized('User not authenticated');
+
+    final taskId = int.tryParse(id);
+    if (taskId == null) return badRequest('Invalid task ID');
+
+    final user = await TaskService.findUserByEmail(userEmail);
+    if (user == null) return notFound('User not found');
+
+    final task = await TaskService.findTaskByIdForUser(taskId, user.id!);
+    if (task == null) return notFound('Task not found or unauthorized');
+
     try {
-      final taskId = int.tryParse(id);
-      final query = request.requestedUri.queryParameters;
-      final userId = int.tryParse(query['userId'] ?? '');
+      log(' Deleting task $taskId for $userEmail');
+      await TaskService.deleteTask(taskId);
+      return jsonResponse(200, {'message': 'Task deleted successfully'});
+    } catch (e, stack) {
+      log(' Error deleting task: $e', stackTrace: stack);
+      return serverError('Failed to delete task: $e');
+    }
+  }
 
-      if (taskId == null || userId == null) {
-        return Response(
-          400,
-          body: jsonEncode({'error': 'Invalid taskId or userId'}),
-          headers: {'Content-Type': 'application/json'},
-        );
-      }
+  static Future<Response> getTopPriorityTasks(Request request) async {
+    final userEmail = request.context['userEmail'] as String?;
+    if (userEmail == null) return unauthorized('User not authenticated');
 
-      final task = await prisma.task.findUnique(
-        where: TaskWhereUniqueInput(id: taskId),
-      );
+    final user = await TaskService.findUserByEmail(userEmail);
+    if (user == null) return notFound('User not found');
 
-      if (task == null || task.userId != userId) {
-        return Response.notFound(
-          jsonEncode({'error': 'Task not found or unauthorized'}),
-        );
-      }
+    try {
+      log(' Fetching top priority tasks for $userEmail');
+      final tasks = await TaskService.getTasksByUserId(user.id!);
+      final topTasks = getTopPriorityTasksList(tasks.toList());
 
-      await prisma.task.delete(where: TaskWhereUniqueInput(id: taskId));
+      final result = topTasks
+          .map(
+            (task) => {
+              'id': task.id,
+              'title': task.title,
+              'description': task.description,
+              'dueDate': task.dueDate?.toIso8601String(),
+              'isDone': task.isDone,
+              'userId': task.userId,
+            },
+          )
+          .toList();
 
-      return Response.ok(
-        jsonEncode({'message': 'Task deleted successfully'}),
-        headers: {'Content-Type': 'application/json'},
-      );
-    } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': 'Failed to delete task: ${e.toString()}'}),
-        headers: {'Content-Type': 'application/json'},
-      );
+      return jsonResponse(200, {'topTasks': result});
+    } catch (e, stack) {
+      log(' Error fetching top tasks: $e', stackTrace: stack);
+      return serverError('Failed to fetch top priority tasks: $e');
+    }
+  }
+
+  static Future<Response> searchTasks(Request request) async {
+    final userEmail = request.context['userEmail'] as String?;
+    if (userEmail == null) return unauthorized('User not authenticated');
+
+    final query = request.url.queryParameters['keyword'] ?? '';
+    if (query.trim().isEmpty) return badRequest('Search keyword is required');
+
+    final user = await TaskService.findUserByEmail(userEmail);
+    if (user == null) return notFound('User not found');
+
+    try {
+      final tasks = await TaskService.getTasksByUserId(user.id!);
+      final matches = tasks
+          .where((task) => task.title != null && rabinKarp(task.title!, query))
+          .toList();
+
+      log(' Found ${matches.length} tasks matching "$query"');
+
+      return jsonResponse(200, {
+        'searchResults': matches
+            .map(
+              (task) => {
+                'id': task.id,
+                'title': task.title,
+                'description': task.description,
+                'dueDate': task.dueDate?.toIso8601String(),
+                'isDone': task.isDone,
+                'userId': task.userId,
+              },
+            )
+            .toList(),
+      });
+    } catch (e, stack) {
+      log(' Error searching tasks: $e', stackTrace: stack);
+      return serverError('Failed to search tasks: $e');
+    }
+  }
+
+  static Future<Response> getTaskTimeline(Request request) async {
+    final userEmail = request.context['userEmail'] as String?;
+    if (userEmail == null) return unauthorized('User not authenticated');
+
+    final user = await TaskService.findUserByEmail(userEmail);
+    if (user == null) return notFound('User not found');
+
+    try {
+      final tasks = (await TaskService.getTasksByUserId(user.id!)).toList();
+      tasks.sort((a, b) => a.dueDate!.compareTo(b.dueDate!));
+
+      log('Generating timeline for $userEmail');
+
+      return jsonResponse(200, {
+        'timeline': tasks
+            .map(
+              (task) => {
+                'id': task.id,
+                'title': task.title,
+                'description': task.description,
+                'dueDate': task.dueDate?.toIso8601String(),
+                'isDone': task.isDone,
+                'userId': task.userId,
+              },
+            )
+            .toList(),
+      });
+    } catch (e, stack) {
+      log(' Error getting task timeline: $e', stackTrace: stack);
+      return serverError('Failed to get task timeline: $e');
+    }
+  }
+
+  static Future<Response> getRecentlyCompletedTasks(Request request) async {
+    try {
+      log(' Fetching recent completed tasks');
+      final recentTasks = TaskHistory.recent();
+
+      final result = recentTasks
+          .map(
+            (task) => {
+              'id': task.id,
+              'title': task.title,
+              'description': task.description,
+              'dueDate': task.dueDate?.toIso8601String(),
+              'isDone': task.isDone,
+              'userId': task.userId,
+            },
+          )
+          .toList();
+
+      return jsonResponse(200, {'recentCompleted': result});
+    } catch (e, stack) {
+      log(' Error getting recent completed tasks: $e', stackTrace: stack);
+      return serverError('Failed to get recent tasks: $e');
     }
   }
 }

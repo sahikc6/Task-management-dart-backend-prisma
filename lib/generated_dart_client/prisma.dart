@@ -3227,6 +3227,7 @@ class TaskUpdateInput implements _i1.JsonConvertible<Map<String, dynamic>> {
     this.dueDate,
     this.isDone,
     this.user,
+    _i1.PrismaUnion<bool, dynamic>? completed,
   });
 
   final _i1.PrismaUnion<String, _i2.StringFieldUpdateOperationsInput>? title;
